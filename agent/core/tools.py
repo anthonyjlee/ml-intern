@@ -53,11 +53,10 @@ from agent.tools.research_tool import RESEARCH_TOOL_SPEC, research_handler
 from agent.tools.sandbox_tool import get_sandbox_tools
 from agent.tools.web_search_tool import WEB_SEARCH_TOOL_SPEC, web_search_handler
 
-# NOTE: Private HF repo tool disabled - replaced by hf_repo_files and hf_repo_git
-# from agent.tools.private_hf_repo_tools import (
-#     PRIVATE_HF_REPO_TOOL_SPEC,
-#     private_hf_repo_handler,
-# )
+from agent.tools.private_hf_repo_tools import (
+    PRIVATE_HF_REPO_TOOL_SPEC,
+    private_hf_repo_handler,
+)
 
 # Suppress aiohttp deprecation warning
 warnings.filterwarnings(
@@ -356,6 +355,12 @@ def create_builtin_tools(local_mode: bool = False) -> list[ToolSpec]:
             description=HF_REPO_GIT_TOOL_SPEC["description"],
             parameters=HF_REPO_GIT_TOOL_SPEC["parameters"],
             handler=hf_repo_git_handler,
+        ),
+        ToolSpec(
+            name=PRIVATE_HF_REPO_TOOL_SPEC["name"],
+            description=PRIVATE_HF_REPO_TOOL_SPEC["description"],
+            parameters=PRIVATE_HF_REPO_TOOL_SPEC["parameters"],
+            handler=private_hf_repo_handler,
         ),
         ToolSpec(
             name=GITHUB_FIND_EXAMPLES_TOOL_SPEC["name"],
