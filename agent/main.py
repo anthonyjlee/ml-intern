@@ -53,7 +53,8 @@ litellm.drop_params = True
 # on every error — users don't need it, and our friendly errors cover the case.
 litellm.suppress_debug_info = True
 
-CLI_CONFIG_PATH = Path(__file__).parent.parent / "configs" / "cli_agent_config.json"
+_DEFAULT_CLI_CONFIG = Path(__file__).parent.parent / "configs" / "cli_agent_config.json"
+CLI_CONFIG_PATH = Path(os.environ.get("ML_INTERN_CONFIG", str(_DEFAULT_CLI_CONFIG)))
 
 
 def _is_scheduled_hf_job_tool(tool_info: dict[str, Any]) -> bool:
@@ -1175,11 +1176,10 @@ async def headless_main(
     _configure_runtime_logging()
 
     hf_token = resolve_hf_token()
-    if not hf_token:
-        print("ERROR: No HF token found. Set HF_TOKEN or run `huggingface-cli login`.", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"HF token loaded", file=sys.stderr)
+    if hf_token:
+        print("HF token loaded", file=sys.stderr)
+    else:
+        print("WARNING: No HF token found - HF Hub tools will be unavailable.", file=sys.stderr)
 
     config = load_config(CLI_CONFIG_PATH, include_user_defaults=True)
     config.yolo_mode = True  # Auto-approve everything in headless mode
@@ -1383,11 +1383,17 @@ def cli():
     parser = argparse.ArgumentParser(description="Hugging Face Agent CLI")
     parser.add_argument("prompt", nargs="?", default=None, help="Run headlessly with this prompt")
     parser.add_argument("--model", "-m", default=None, help=f"Model to use (default: from config)")
+    parser.add_argument("--config", "-c", default=None, help="Path to config JSON (default: configs/cli_agent_config.json or ML_INTERN_CONFIG env var)")
     parser.add_argument("--max-iterations", type=int, default=None,
                         help="Max LLM requests per turn (default: 50, use -1 for unlimited)")
     parser.add_argument("--no-stream", action="store_true",
                         help="Disable token streaming (use non-streaming LLM calls)")
     args = parser.parse_args()
+
+    if args.config:
+        os.environ["ML_INTERN_CONFIG"] = args.config
+        global CLI_CONFIG_PATH
+        CLI_CONFIG_PATH = Path(args.config)
 
     try:
         if args.prompt:
