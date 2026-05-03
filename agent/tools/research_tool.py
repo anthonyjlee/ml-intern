@@ -17,6 +17,7 @@ from litellm import Message, acompletion
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
 from agent.core.llm_params import _resolve_llm_params
+from agent.core.llm_response import first_choice
 from agent.core.prompt_caching import with_prompt_caching
 from agent.core.session import Event
 
@@ -356,7 +357,12 @@ async def research_handler(
                     )
                 except Exception as _telem_err:
                     logger.debug("research telemetry failed: %s", _telem_err)
-                content = response.choices[0].message.content or ""
+                choice = first_choice(
+                    response,
+                    model_name=llm_params.get("model"),
+                    operation="Research context summary response",
+                )
+                content = choice.message.content or ""
                 return content or "Research context exhausted — no summary produced.", bool(content)
             except Exception:
                 return "Research context exhausted and summary call failed.", False
@@ -406,7 +412,11 @@ async def research_handler(
             _total_tokens = response.usage.total_tokens
             await _log(f"tokens:{_total_tokens}")
 
-        choice = response.choices[0]
+        choice = first_choice(
+            response,
+            model_name=llm_params.get("model"),
+            operation="Research agent response",
+        )
         msg = choice.message
 
         # If no tool calls, we have our final answer
@@ -507,7 +517,12 @@ async def research_handler(
             )
         except Exception as _telem_err:
             logger.debug("research telemetry failed: %s", _telem_err)
-        content = response.choices[0].message.content or ""
+        choice = first_choice(
+            response,
+            model_name=llm_params.get("model"),
+            operation="Research iteration summary response",
+        )
+        content = choice.message.content or ""
         if content:
             return content, True
     except Exception as e:

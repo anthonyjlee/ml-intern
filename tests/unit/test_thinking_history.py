@@ -6,8 +6,9 @@ from litellm import ChatCompletionMessageToolCall, Message
 from agent.core import agent_loop
 from agent.core.agent_loop import (
     LLMResult,
-    _call_llm_streaming,
     _assistant_message_from_result,
+    _call_llm_non_streaming,
+    _call_llm_streaming,
     _extract_thinking_state,
 )
 
@@ -297,3 +298,47 @@ async def test_streaming_call_skips_chunk_rebuild_for_non_anthropic(monkeypatch)
     assert result.content == "done"
     assert result.thinking_blocks is None
     assert result.reasoning_content is None
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_empty_choices_retries_then_raises_clear_error(monkeypatch):
+    attempts = 0
+
+    async def fake_acompletion(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        return SimpleNamespace(choices=[], usage=SimpleNamespace(total_tokens=0))
+
+    async def fake_sleep(_delay):
+        return None
+
+    events = []
+
+    async def send_event(event):
+        events.append(event)
+
+    session = SimpleNamespace(
+        config=SimpleNamespace(model_name="openai/test-model"),
+        is_cancelled=False,
+        send_event=send_event,
+    )
+    monkeypatch.setattr(agent_loop, "acompletion", fake_acompletion)
+    monkeypatch.setattr(agent_loop.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(RuntimeError, match="empty choices"):
+        await _call_llm_non_streaming(
+            session,
+            messages=[Message(role="user", content="hi")],
+            tools=[],
+            llm_params={"model": "openai/test-model"},
+        )
+
+    assert attempts == 3
+    assert [
+        event.data["log"]
+        for event in events
+        if event.event_type == "tool_log"
+    ] == [
+        "LLM returned an empty response, retrying in 5s...",
+        "LLM returned an empty response, retrying in 15s...",
+    ]

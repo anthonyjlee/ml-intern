@@ -14,6 +14,7 @@ import yaml
 from jinja2 import Template
 from litellm import Message, acompletion
 
+from agent.core.llm_response import first_choice
 from agent.core.prompt_caching import with_prompt_caching
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,12 @@ async def summarize_messages(
             finish_reason=response.choices[0].finish_reason if response.choices else None,
             kind=kind,
         )
-    summary = response.choices[0].message.content or ""
+    choice = first_choice(
+        response,
+        model_name=llm_params.get("model"),
+        operation="Context summary response",
+    )
+    summary = choice.message.content or ""
     completion_tokens = response.usage.completion_tokens if response.usage else 0
     return summary, completion_tokens
 

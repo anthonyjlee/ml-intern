@@ -37,6 +37,7 @@ import user_quotas
 from agent.core.hf_access import get_jobs_access
 from agent.core.hf_tokens import resolve_hf_request_token, resolve_hf_router_token
 from agent.core.llm_params import _resolve_llm_params
+from agent.core.llm_response import first_choice
 
 logger = logging.getLogger(__name__)
 
@@ -344,7 +345,12 @@ async def generate_title(
             timeout=10,
             reasoning_effort="low",
         )
-        title = response.choices[0].message.content.strip().strip('"').strip("'")
+        choice = first_choice(
+            response,
+            model_name="openai/openai/gpt-oss-120b:cerebras",
+            operation="Title generation response",
+        )
+        title = choice.message.content.strip().strip('"').strip("'")
         title = title.translate(_TITLE_STRIP_CHARS).strip()
         if len(title) > 50:
             title = title[:50].rstrip() + "…"
