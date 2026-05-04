@@ -1,0 +1,35 @@
+{
+  "model_name": "anthropic/claude-sonnet-4-6",
+  "save_sessions": false,
+  "yolo_mode": false,
+  "confirm_cpu_jobs": false,
+  "auto_file_upload": false,
+  "max_iterations": 60,
+  "mcpServers": {
+    "agentic-scrape": {
+      "transport": "streamable-http",
+      "url": "https://scraper-mcp-production-47b4.up.railway.app/mcp",
+      "headers": {
+        "Authorization": "Bearer PgT84Ab/TVwPtSf97+HSKOa398rtSE9nViqzXfKRUJxy3aubRewrYs4llS/35t97"
+      }
+    },
+    "relove-gtm": {
+      "transport": "stdio",
+      "command": "/Users/anthonylee/miniconda3/bin/python",
+      "args": ["/Users/anthonylee/Documents/Projects/agentic-OSINT/mcp/relove_mcp.py"],
+      "env": {
+        "ORCA_API_URL": "https://agentic-osint-api-production.up.railway.app",
+        "ORCA_RELOVE_CASE_ID": "relove_gtm"
+      }
+    },
+    "orca-equity": {
+      "transport": "stdio",
+      "command": "/Users/anthonylee/miniconda3/bin/python",
+      "args": ["/Users/anthonylee/Documents/Projects/agentic-OSINT/mcp/equity_mcp.py"],
+      "env": {
+        "ORCA_API_URL": "https://agentic-osint-api-production.up.railway.app",
+        "ORCA_CASE_ID": "equities_test"
+      }
+    }
+  }
+}
