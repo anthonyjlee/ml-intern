@@ -99,7 +99,6 @@ import sys
 import tempfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Iterable
 
 logger = logging.getLogger("build_kpis")
@@ -259,6 +258,11 @@ def _session_metrics(session: dict) -> dict:
     # success/output) so we can attribute calls to specific tools.
     tool_calls_by_name: dict[str, int] = defaultdict(int)
     total_named_tool_calls = 0
+    # Per-tool failure counters from tool_output events. tool_output carries
+    # both "tool" (the name) and "success" (bool), so we can attribute failures
+    # to specific tools. This closes the observability gap: previously all
+    # failures were counted in a single global "tool_calls_failed" counter.
+    tool_failures_by_name: dict[str, int] = defaultdict(int)
 
     start_dt = _parse_ts(session_start)
 
@@ -279,6 +283,11 @@ def _session_metrics(session: dict) -> dict:
             tool_total += 1
             if data.get("success"):
                 tool_success += 1
+            else:
+                # Track which tool failed so the dashboard can surface
+                # per-tool failure counts (e.g. "research failed 3×").
+                failed_tool = data.get("tool") or "unknown"
+                tool_failures_by_name[failed_tool] += 1
             if first_tool_ts is None and ts is not None and start_dt is not None:
                 first_tool_ts = (ts - start_dt).total_seconds()
 
@@ -364,7 +373,9 @@ def _session_metrics(session: dict) -> dict:
     # Intra-session tool fields. Underscore-prefixed = consumed by _aggregate
     # only, never written to CSV directly.
     out["_tool_calls_by_name"] = dict(tool_calls_by_name)
+    out["_tool_failures_by_name"] = dict(tool_failures_by_name)
     out["_research_calls"] = tool_calls_by_name.get("research", 0)
+    out["_research_failures"] = tool_failures_by_name.get("research", 0)
     out["_distinct_tools_used"] = len(tool_calls_by_name)
     out["_total_named_tool_calls"] = total_named_tool_calls
     out["_model_name"] = session.get("model_name") or "unknown"
@@ -383,12 +394,15 @@ def _aggregate(per_session: list[dict]) -> dict:
     # once per tool, so the dashboard can show "how many sessions reached for
     # research" alongside "how many research calls overall".
     tool_calls_by_name: dict[str, int] = defaultdict(int)
+    tool_failures_by_name: dict[str, int] = defaultdict(int)
     sessions_using_tool: dict[str, int] = defaultdict(int)
     sessions_by_model: dict[str, int] = defaultdict(int)
     for s in per_session:
         for name, count in (s.get("_tool_calls_by_name") or {}).items():
             tool_calls_by_name[name] += int(count)
             sessions_using_tool[name] += 1
+        for name, count in (s.get("_tool_failures_by_name") or {}).items():
+            tool_failures_by_name[name] += int(count)
         sessions_by_model[s.get("_model_name") or "unknown"] += 1
 
     # Percentile inputs. All "per session" percentiles exclude sessions that
@@ -416,6 +430,7 @@ def _aggregate(per_session: list[dict]) -> dict:
     regenerates = int(sum(s["regenerate_sessions"] for s in per_session))
     research_calls_total = int(sum(s.get("_research_calls", 0) for s in per_session))
     sessions_with_research = sum(1 for s in per_session if s.get("_research_calls", 0) > 0)
+    research_failures_total = int(sum(s.get("_research_failures", 0) for s in per_session))
 
     # Per-session cost percentiles — chart "median session cost" alongside the
     # mean so a few $700 outliers don't make you think every session is pricey.
@@ -477,6 +492,7 @@ def _aggregate(per_session: list[dict]) -> dict:
         "gpu_hours_by_flavor_json": json.dumps(dict(gpu_hours), sort_keys=True),
         # Research KPIs — answer "is the agent reaching for research?".
         "research_calls": research_calls_total,
+        "research_failures": research_failures_total,
         "sessions_with_research": int(sessions_with_research),
         "research_calls_per_session_p50": round(_percentile(research_calls_nz, 0.5), 2),
         "research_calls_per_session_p95": round(_percentile(research_calls_nz, 0.95), 2),
@@ -489,6 +505,9 @@ def _aggregate(per_session: list[dict]) -> dict:
         "tool_calls_per_turn_p95": round(_percentile(calls_per_turn_values, 0.95), 2),
         # JSON columns let the dashboard add/remove tools without schema churn.
         "tool_calls_by_name_json": json.dumps(dict(tool_calls_by_name), sort_keys=True),
+        # Per-tool failure counts: {"research": 3, "bash": 1, ...}
+        # This is the primary signal for diagnosing tool-specific reliability issues.
+        "tool_failures_by_name_json": json.dumps(dict(tool_failures_by_name), sort_keys=True),
         "sessions_using_tool_json": json.dumps(dict(sessions_using_tool), sort_keys=True),
         # Surface split — answers "is research dropping on Bedrock specifically?".
         "sessions_by_model_json": json.dumps(dict(sessions_by_model), sort_keys=True),

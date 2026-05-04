@@ -7,12 +7,13 @@ work doesn't pollute the main agent's context window.
 Inspired by claude-code's code-explorer agent pattern.
 """
 
+import asyncio
 import json
 import logging
 import time
 from typing import Any
 
-from litellm import Message, acompletion
+from litellm import Message, acompletion  # acompletion used directly for summary calls only
 
 from agent.core import telemetry
 from agent.core.doom_loop import check_for_doom_loop
@@ -22,6 +23,94 @@ from agent.core.prompt_caching import with_prompt_caching
 from agent.core.session import Event
 
 logger = logging.getLogger(__name__)
+
+# ── Transient-error retry policy ─────────────────────────────────────────────
+
+# HTTP status codes that are safe to retry (rate-limit, gateway, overload).
+_RETRYABLE_STATUS: set[int] = {429, 500, 502, 503, 529}
+# How many times to attempt each LLM call before propagating the error.
+_MAX_RETRIES: int = 3
+# Base delay (seconds) for exponential backoff: 2s → 4s → 8s.
+_RETRY_BACKOFF_BASE: float = 2.0
+
+
+def _classify_research_error(exc: BaseException) -> str:
+    """Map an exception to a machine-readable error category.
+
+    Categories (appear as ``[error:<category>]`` prefix in tool output):
+    - ``transient_api_error``  — rate-limit, gateway, overload, timeout
+    - ``context_limit``        — context window exceeded by the sub-model
+    - ``iteration_limit``      — hit max research iterations without completing
+    - ``unknown``              — anything else
+    """
+    try:
+        import litellm  # local import — only available at runtime
+        if isinstance(exc, (
+            litellm.RateLimitError,
+            litellm.ServiceUnavailableError,
+            litellm.APIConnectionError,
+            litellm.Timeout,
+        )):
+            return "transient_api_error"
+        if isinstance(exc, litellm.ContextWindowExceededError):
+            return "context_limit"
+    except ImportError:
+        pass
+    exc_str = str(exc).lower()
+    if any(k in exc_str for k in ("rate limit", "429", "502", "503", "529",
+                                   "timeout", "timed out", "overloaded",
+                                   "service unavailable")):
+        return "transient_api_error"
+    if any(k in exc_str for k in ("context window", "context length",
+                                   "maximum context", "too many tokens")):
+        return "context_limit"
+    return "unknown"
+
+
+async def _acompletion_with_retry(
+    *,
+    log_fn,
+    backoff_base: float = _RETRY_BACKOFF_BASE,
+    _acompletion_fn=None,  # injected in tests; None → real acompletion
+    **kwargs,
+):
+    """Wrap ``acompletion`` with exponential-backoff retry for transient errors.
+
+    Retries up to ``_MAX_RETRIES`` times on rate-limits, gateway errors, and
+    timeouts. Non-retryable exceptions propagate immediately. On exhaustion the
+    last exception is re-raised so the caller can classify and surface it.
+
+    ``log_fn`` is the research sub-agent's ``_log`` coroutine — used to emit
+    visible progress events so the UI doesn't look frozen during backoff.
+
+    ``_acompletion_fn`` is used by tests to inject a mock without fighting
+    litellm's decorator chain. Production callers always leave it as None.
+    """
+    if _acompletion_fn is None:
+        from litellm import acompletion as _acompletion_fn  # type: ignore[assignment]
+    last_exc: BaseException | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return await _acompletion_fn(**kwargs)
+        except BaseException as exc:
+            category = _classify_research_error(exc)
+            if category != "transient_api_error" or attempt == _MAX_RETRIES - 1:
+                raise
+            wait = backoff_base * (2 ** attempt)
+            logger.warning(
+                "Research sub-agent transient error (attempt %d/%d, retry in %.1fs): %s",
+                attempt + 1, _MAX_RETRIES, wait, exc,
+            )
+            try:
+                await log_fn(f"retry:{attempt + 1} after {wait:.0f}s ({category})")
+            except Exception:
+                pass
+            last_exc = exc
+            await asyncio.sleep(wait)
+    # Should be unreachable — the loop always re-raises on the last attempt —
+    # but keep mypy happy.
+    raise last_exc  # type: ignore[misc]
+
 
 # Context budget for the research subagent (tokens).
 # When usage exceeds WARN threshold, the subagent is told to wrap up.
@@ -364,8 +453,10 @@ async def research_handler(
                 )
                 content = choice.message.content or ""
                 return content or "Research context exhausted — no summary produced.", bool(content)
-            except Exception:
-                return "Research context exhausted and summary call failed.", False
+            except Exception as _ctx_exc:
+                await _log("error:context_limit")
+                logger.error("Research context-limit summary call failed: %s", _ctx_exc)
+                return "[error:context_limit] Research context exhausted and summary call failed.", False
 
         if not _warned_context and _total_tokens >= _RESEARCH_CONTEXT_WARN:
             _warned_context = True
@@ -384,7 +475,9 @@ async def research_handler(
                 messages, tool_specs if tool_specs else None, llm_params.get("model")
             )
             _t0 = time.monotonic()
-            response = await acompletion(
+            # Use retry wrapper: up to _MAX_RETRIES attempts for transient errors.
+            response = await _acompletion_with_retry(
+                log_fn=_log,
                 messages=_msgs,
                 tools=_tools,
                 tool_choice="auto",
@@ -404,8 +497,14 @@ async def research_handler(
             except Exception as _telem_err:
                 logger.debug("research telemetry failed: %s", _telem_err)
         except Exception as e:
-            logger.error("Research sub-agent LLM error: %s", e)
-            return f"Research agent LLM error: {e}", False
+            error_reason = _classify_research_error(e)
+            logger.error(
+                "Research sub-agent LLM error [%s]: %s", error_reason, e,
+            )
+            # Emit a structured log event so the KPI pipeline and monitoring can
+            # classify this failure without parsing exception messages.
+            await _log(f"error:{error_reason}")
+            return f"[error:{error_reason}] Research agent LLM error: {e}", False
 
         # Track tokens
         if response.usage:
@@ -526,10 +625,11 @@ async def research_handler(
         if content:
             return content, True
     except Exception as e:
-        logger.error("Research summary call failed: %s", e)
+        await _log("error:iteration_limit")
+        logger.error("Research iteration-limit summary call failed: %s", e)
 
     return (
-        "Research agent hit iteration limit (60). "
+        "[error:iteration_limit] Research agent hit iteration limit (60). "
         "Partial findings may be incomplete — try a more focused task.",
         False,
     )
